@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+data/hf_cache/
+data/sentence_transformers/
+data/reranker/
+logs/
+*.log
+src/finsage_mcp_server.py
