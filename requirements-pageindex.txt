@@ -1,0 +1,3 @@
+# Optional dependencies for offline PageIndex ingestion only.
+# Keep these separate from requirements.txt so normal BanyanTree runs stay stable.
+git+https://github.com/VectifyAI/PageIndex.git

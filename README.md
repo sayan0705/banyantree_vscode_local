@@ -51,6 +51,50 @@ Or open the folder in VS Code and run the `BanyanTree Agentic Local` debug confi
 
 This project is configured to run `Qwen/Qwen2.5-7B-Instruct` locally. Use a CUDA-enabled NVIDIA GPU machine for the full agent run.
 
+## Financial KG Docs
+
+Seed financial documents live outside code:
+
+```text
+data/financial_kg/raw_docs/seed/personal_finance_seed.json
+```
+
+PageIndex-style structure JSON files can be staged here:
+
+```text
+data/financial_kg/pageindex/structures/
+```
+
+Optional PageIndex ingestion dependencies are separate from the normal app:
+
+```powershell
+python -m pip install -r requirements-pageindex.txt
+```
+
+PageIndex indexing is an offline step. It should be run only when source PDFs/Markdown/text files change:
+
+```powershell
+python .\scripts\run_pageindex_indexing.py
+```
+
+Flatten PageIndex structures into LightRAG-ready docs:
+
+```powershell
+python .\scripts\import_pageindex_docs.py
+```
+
+The flattened output is written to:
+
+```text
+data/financial_kg/raw_docs/pageindex/pageindex_flattened_docs.json
+```
+
+Detailed workflow:
+
+```text
+docs/financial_kg_pageindex_workflow.md
+```
+
 If you see `ModuleNotFoundError: No module named 'torch'`, do not run with `C:\Users\SChowdhury\AppData\Local\Python\bin\python.exe`. That is your global Python 3.14 interpreter. Run `scripts\setup.ps1`, then select `.venv\Scripts\python.exe` from VS Code's `Python: Select Interpreter`.
 
 This project requires Python 3.10, 3.11, or 3.12 for the pinned PyTorch stack. If setup says Python 3.14 is unsupported, install Python 3.11 and rerun setup.

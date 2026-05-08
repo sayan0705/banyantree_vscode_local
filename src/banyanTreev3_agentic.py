@@ -17,18 +17,62 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 DATA_DIR = Path(os.environ.get("BANYANTREE_DATA_DIR", PROJECT_ROOT / "data")).resolve()
 KG_ROOT = Path(os.environ.get("BANYANTREE_KG_ROOT", DATA_DIR / "kg")).resolve()
+FINANCIAL_KG_ROOT = Path(os.environ.get("BANYANTREE_FINANCIAL_KG_ROOT", DATA_DIR / "financial_kg")).resolve()
+RAW_DOCS_DIR = Path(os.environ.get("BANYANTREE_RAW_DOCS_DIR", FINANCIAL_KG_ROOT / "raw_docs")).resolve()
+SEED_DOCS_PATH = Path(
+    os.environ.get("BANYANTREE_SEED_DOCS_PATH", RAW_DOCS_DIR / "seed" / "personal_finance_seed.json")
+).resolve()
+PAGEINDEX_FLATTENED_DOCS_PATH = Path(
+    os.environ.get("BANYANTREE_PAGEINDEX_FLATTENED_DOCS_PATH", RAW_DOCS_DIR / "pageindex" / "pageindex_flattened_docs.json")
+).resolve()
 MEMORY_DIR = Path(os.environ.get("BANYANTREE_MEMORY_DIR", DATA_DIR / "memory")).resolve()
 LOG_DIR = Path(os.environ.get("BANYANTREE_LOG_DIR", PROJECT_ROOT / "logs")).resolve()
 MCP_SERVER_FILE = Path(os.environ.get("BANYANTREE_MCP_SERVER_FILE", SRC_DIR / "finsage_mcp_server.py")).resolve()
 
-for _path in (DATA_DIR, KG_ROOT, MEMORY_DIR, LOG_DIR):
+for _path in (DATA_DIR, KG_ROOT, FINANCIAL_KG_ROOT, RAW_DOCS_DIR, SEED_DOCS_PATH.parent, PAGEINDEX_FLATTENED_DOCS_PATH.parent, MEMORY_DIR, LOG_DIR):
     _path.mkdir(parents=True, exist_ok=True)
 
 os.environ.setdefault("HF_HOME", str(DATA_DIR / "hf_cache"))
-os.environ.setdefault("FINSAGE_KG_PATH", str(KG_ROOT / "finsage_final_kg"))
+os.environ.setdefault("FINSAGE_KG_PATH", str(FINANCIAL_KG_ROOT / "lightrag"))
 os.environ.setdefault("BANYANTREE_TOOL_POLICY_PATH", str(PROJECT_ROOT / "config" / "tool_permission_policy.json"))
 os.environ.setdefault("BANYANTREE_AGENTIC_MEMORY_FILE", str(MEMORY_DIR / "banyantree_agent_memory.json"))
 MCP_BASE = os.environ.get("BANYANTREE_MCP_BASE", "http://localhost:8000")
+
+def _load_financial_doc_file(path: Path, required: bool = False) -> list:
+    if not path.exists():
+        if required:
+            raise FileNotFoundError(
+                f"Financial docs not found: {path}. "
+                "Create the docs file or update the matching BANYANTREE_*_DOCS_PATH setting."
+            )
+        return []
+
+    with open(path, "r", encoding="utf-8-sig") as f:
+        docs = json.load(f)
+
+    if not isinstance(docs, list):
+        raise ValueError(f"Financial docs file must contain a JSON list: {path}")
+
+    normalized = []
+    for i, doc in enumerate(docs):
+        if not isinstance(doc, dict):
+            raise ValueError(f"Doc #{i} must be a JSON object")
+        title = str(doc.get("title", f"Document_{i}")).strip()
+        content = str(doc.get("content", "")).strip()
+        if not content:
+            continue
+        normalized.append({**doc, "title": title, "content": content})
+
+    return normalized
+
+
+def load_financial_docs(path: Path = SEED_DOCS_PATH) -> list:
+    docs = _load_financial_doc_file(path, required=True)
+    pageindex_docs = _load_financial_doc_file(PAGEINDEX_FLATTENED_DOCS_PATH, required=False)
+    if pageindex_docs:
+        print(f"Loaded {len(pageindex_docs)} PageIndex docs from {PAGEINDEX_FLATTENED_DOCS_PATH}")
+        docs.extend(pageindex_docs)
+    return docs
 
 # =================================================================
 # SINGLE CANONICAL MCP SERVER - tools + agentic market workflow
@@ -116,16 +160,17 @@ def _alloc(text):
 
 def _fallback_rag(query, top_k=4):
     base=os.environ.get('FINSAGE_KG_PATH', os.path.join(os.getcwd(), 'data', 'kg', 'finsage_final_kg'))
-    docs_p=os.path.join(base, 'documents.json'); titles_p=os.path.join(base, 'titles.json')
+    docs_p=os.path.join(base, 'documents.json'); titles_p=os.path.join(base, 'titles.json'); meta_p=os.path.join(base, 'document_metadata.json')
     if not (os.path.exists(docs_p) and os.path.exists(titles_p)): return []
     docs=json.load(open(docs_p)); titles=json.load(open(titles_p))
+    metas=json.load(open(meta_p)) if os.path.exists(meta_p) else [{} for _ in docs]
     terms=[t for t in re.findall(r'\w+', query.lower()) if len(t)>2]
     scored=[]
     for i,doc in enumerate(docs):
         score=sum(doc.lower().count(t) for t in terms)
         if score>0: scored.append((score, i))
     scored.sort(reverse=True)
-    return [{'title': titles[i], 'content': docs[i][:400], 'source': 'persisted_rag'} for _,i in scored[:top_k]]
+    return [{'title': titles[i], 'content': docs[i][:400], 'metadata': metas[i] if i < len(metas) else {}, 'source': 'persisted_rag'} for _,i in scored[:top_k]]
 
 
 def _load_agentic_memory():
@@ -659,6 +704,33 @@ def build_qwen_prompt(tokenizer, system: str, user: str) -> str:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+def format_retrieved_doc_for_prompt(doc: dict, index: int, max_chars: int = 420) -> str:
+    src = doc.get("source", "vector+bm25")
+    metadata = doc.get("metadata") or {}
+    label = " [LIVE DATA]" if src == "mcp_tool" else ""
+    lines = [f"[Doc {index}{label}]", f"Title: {doc.get('title', 'Untitled')}", f"Source: {src}"]
+    source_type = metadata.get("source_type")
+    if source_type:
+        lines.append(f"Source type: {source_type}")
+    category = metadata.get("category")
+    if category:
+        lines.append(f"Category: {category}")
+    section_path = metadata.get("section_path") or []
+    if section_path:
+        if isinstance(section_path, list):
+            lines.append("Section path: " + " > ".join(str(part) for part in section_path))
+        else:
+            lines.append(f"Section path: {section_path}")
+    page_start, page_end = metadata.get("page_start"), metadata.get("page_end")
+    if page_start or page_end:
+        lines.append(f"Pages: {page_start or '?'}-{page_end or page_start or '?'}")
+    node_id = metadata.get("node_id")
+    if node_id:
+        lines.append(f"Node ID: {node_id}")
+    content = str(doc.get("content", "")).replace(chr(10), " ").strip()[:max_chars]
+    lines.append(f"Content: {content}")
+    return "\n".join(lines)
 
 class OpenAICompatibleChatLLM:
     def __init__(self, api_key: str, model: str, base_url: str = "https://api.openai.com/v1"):
@@ -1269,8 +1341,12 @@ class FINANCIAL_HIERARCHICAL_LIGHT_RAG:
         self.device = "api" if USE_API_LLM else ("cuda" if torch.cuda.is_available() else "cpu")
         llm_note = f"API model: {API_MODEL_ID}" if USE_API_LLM else "Local Qwen model"
         print(f"\n{'='*60}\n  FinSage Financial LightRAG Final\n  Device  : {self.device}\n  Screener: local Playwright (notebook process)\n  AMFI    : MCP server (httpx)\n  LLM     : {llm_note}\n{'='*60}")
-        self.kg_db_path = str((KG_ROOT / kg_db_path).resolve())
+        self.financial_kg_root = FINANCIAL_KG_ROOT
+        self.kg_db_path = str((FINANCIAL_KG_ROOT / "lightrag").resolve())
+        self.graph_db_path = str((FINANCIAL_KG_ROOT / "graph").resolve())
+        self.legacy_kg_db_path = str((KG_ROOT / kg_db_path).resolve())
         os.makedirs(self.kg_db_path, exist_ok=True)
+        os.makedirs(self.graph_db_path, exist_ok=True)
         self.pii_redactor = FinancialPIIRedactor()
         self.output_guard = OutputGuardrail()
         self.memory = ConversationMemory(max_turns=5)
@@ -1329,7 +1405,7 @@ class FINANCIAL_HIERARCHICAL_LIGHT_RAG:
             self.rerank_enabled = False
             print(f"Re-ranker unavailable ({e})")
 
-        self.documents, self.titles = [], []
+        self.documents, self.titles, self.document_metadata = [], [], []
         self.document_embeddings = None
         self.neighbor_index = None
         self.community_index = None
@@ -1347,17 +1423,23 @@ class FINANCIAL_HIERARCHICAL_LIGHT_RAG:
     def save_kg_database(self):
         print("Saving...")
         try:
-            saves = {
+            graph_saves = {
                 "knowledge_graph.json": nx.node_link_data(self.kg),
                 "entity_contexts.json": dict(self.entity_contexts),
                 "entity_cooccurrence.json": {f"{k[0]}||{k[1]}": v for k, v in self.entity_cooccurrence.items()},
+            }
+            lightrag_saves = {
                 "query_history.json": self.query_history[-100:],
                 "community_summaries.json": {str(k): v for k, v in self.community_summaries.items()},
                 "documents.json": self.documents, "titles.json": self.titles,
+                "document_metadata.json": self.document_metadata,
                 "metadata.json": {"last_updated": datetime.now().isoformat(), "total_entities": self.kg.number_of_nodes(),
-                                  "total_relationships": self.kg.number_of_edges(), "total_documents": len(self.documents)}
+                                  "total_relationships": self.kg.number_of_edges(), "total_documents": len(self.documents),
+                                  "lightrag_path": self.kg_db_path, "graph_path": self.graph_db_path}
             }
-            for fname, data in saves.items():
+            for fname, data in graph_saves.items():
+                with open(f"{self.graph_db_path}/{fname}", "w") as f: json.dump(data, f, indent=2)
+            for fname, data in lightrag_saves.items():
                 with open(f"{self.kg_db_path}/{fname}", "w") as f: json.dump(data, f, indent=2)
             if self.neighbor_index is not None: faiss.write_index(self.neighbor_index, f"{self.kg_db_path}/faiss_index.index")
             if self.document_embeddings is not None: np.save(f"{self.kg_db_path}/document_embeddings.npy", self.document_embeddings)
@@ -1369,24 +1451,45 @@ class FINANCIAL_HIERARCHICAL_LIGHT_RAG:
         print("Loading saved KG database (if exists)...")
         try:
             loaders = {
+                "query_history.json": lambda d: setattr(self, "query_history", d),
+                "community_summaries.json": lambda d: setattr(self, "community_summaries", {int(k): v for k, v in d.items()}),
+                "document_metadata.json": lambda d: setattr(self, "document_metadata", d if isinstance(d, list) else []),
+                "documents.json": lambda d: setattr(self, "documents", d), "titles.json": lambda d: setattr(self, "titles", d)
+            }
+            graph_loaders = {
                 "knowledge_graph.json": lambda d: setattr(self, "kg", nx.node_link_graph(d)),
                 "entity_contexts.json": lambda d: self.entity_contexts.update(d),
                 "entity_cooccurrence.json": lambda d: self.entity_cooccurrence.update({tuple(k.split("||")): v for k, v in d.items()}),
-                "query_history.json": lambda d: setattr(self, "query_history", d),
-                "community_summaries.json": lambda d: setattr(self, "community_summaries", {int(k): v for k, v in d.items()}),
-                "documents.json": lambda d: setattr(self, "documents", d), "titles.json": lambda d: setattr(self, "titles", d)
             }
+            for fname, loader in graph_loaders.items():
+                p = f"{self.graph_db_path}/{fname}"
+                if not os.path.exists(p):
+                    legacy_p = f"{self.legacy_kg_db_path}/{fname}"
+                    p = legacy_p if os.path.exists(legacy_p) else p
+                if os.path.exists(p):
+                    with open(p) as f: loader(json.load(f))
             for fname, loader in loaders.items():
                 p = f"{self.kg_db_path}/{fname}"
+                if not os.path.exists(p):
+                    legacy_p = f"{self.legacy_kg_db_path}/{fname}"
+                    p = legacy_p if os.path.exists(legacy_p) else p
                 if os.path.exists(p):
                     with open(p) as f: loader(json.load(f))
             for attr, fname in [("document_embeddings", "document_embeddings.npy"), ("communities", "communities.npy")]:
                 p = f"{self.kg_db_path}/{fname}"
+                if not os.path.exists(p):
+                    legacy_p = f"{self.legacy_kg_db_path}/{fname}"
+                    p = legacy_p if os.path.exists(legacy_p) else p
                 if os.path.exists(p):
                     val = np.load(p)
                     setattr(self, attr, val.tolist() if attr == "communities" else val)
             p = f"{self.kg_db_path}/faiss_index.index"
+            if not os.path.exists(p):
+                legacy_p = f"{self.legacy_kg_db_path}/faiss_index.index"
+                p = legacy_p if os.path.exists(legacy_p) else p
             if os.path.exists(p): self.neighbor_index = faiss.read_index(p)
+            if len(self.document_metadata) < len(self.documents):
+                self.document_metadata.extend({} for _ in range(len(self.documents) - len(self.document_metadata)))
             if self.documents: self.bm25 = BM25Okapi([d.lower().split() for d in self.documents])
             if self.document_embeddings is not None and self.communities: self._rebuild_community_index()
             if self.documents: print(f"   Loaded {len(self.documents)} docs, {self.kg.number_of_nodes()} KG entities")
@@ -1411,7 +1514,17 @@ class FINANCIAL_HIERARCHICAL_LIGHT_RAG:
             title, content = doc.get("title", f"Document_{i}"), doc.get("content", "")
             redacted, pii_found = self.pii_redactor.redact(content)
             if pii_found: print(f"{title}: {len(pii_found)} PII redacted")
-            self.documents.append(redacted); self.titles.append(title)
+            metadata = {
+                "source_type": doc.get("source_type", "unknown"),
+                "category": doc.get("category", ""),
+                "doc_id": doc.get("doc_id", title),
+                "source_path": doc.get("source_path", ""),
+                "section_path": doc.get("section_path", []),
+                "page_start": doc.get("page_start"),
+                "page_end": doc.get("page_end"),
+                "node_id": doc.get("node_id"),
+            }
+            self.documents.append(redacted); self.titles.append(title); self.document_metadata.append(metadata)
         print(f"{len(self.documents)} documents ingested")
         self._build_hybrid_indices()
 
@@ -1567,7 +1680,16 @@ class FINANCIAL_HIERARCHICAL_LIGHT_RAG:
         bm25_idx = self._bm25_search(clean_query, k)
         fused_idx = self._rrf_fusion(vector_idx, bm25_idx)
         final_idx = self._rerank(clean_query, fused_idx, top_n=3)
-        vector_docs = [{"content": self.documents[idx], "title": self.titles[idx], "community": int(self.communities[idx]) if len(self.communities) > 0 else 0, "source": "vector+bm25"} for idx in final_idx if idx < len(self.documents)]
+        vector_docs = [
+            {
+                "content": self.documents[idx],
+                "title": self.titles[idx],
+                "metadata": self.document_metadata[idx] if idx < len(self.document_metadata) else {},
+                "community": int(self.communities[idx]) if len(self.communities) > 0 else 0,
+                "source": "vector+bm25",
+            }
+            for idx in final_idx if idx < len(self.documents)
+        ]
         kg_docs = self.kg_local_search(clean_query)
         seen_titles = {d["title"] for d in vector_docs}
         for doc in kg_docs:
@@ -1577,16 +1699,19 @@ class FINANCIAL_HIERARCHICAL_LIGHT_RAG:
             src = doc.get("source", "vector+bm25")
             ind = "[KG]" if src.startswith("KG") else "[VEC]"
             ttl = doc["title"][:50] + "..." if len(doc["title"]) > 50 else doc["title"]
-            print(f"      {ind} [{src}] {ttl}")
+            meta = doc.get("metadata") or {}
+            meta_bits = [str(meta.get("source_type") or "").strip(), str(meta.get("category") or "").strip()]
+            if meta.get("page_start") or meta.get("page_end"):
+                meta_bits.append(f"p.{meta.get('page_start') or '?'}-{meta.get('page_end') or meta.get('page_start') or '?'}")
+            meta_text = " | ".join(bit for bit in meta_bits if bit)
+            print(f"      {ind} [{src}] {ttl}" + (f" ({meta_text})" if meta_text else ""))
         return retrieved, community_context, self.find_kg_paths(clean_query)
 
     def generate(self, query: str, docs: list, community_context: list, reasoning_paths: list) -> str:
         if not docs: return "I don't have enough information to answer accurately. Consult a SEBI-registered financial advisor."
         context_parts = []
         for i, doc in enumerate(docs[:4], 1):
-            src = doc.get("source", "vector+bm25")
-            lbl = " [LIVE DATA]" if src == "mcp_tool" else ""
-            context_parts.append(f"[Doc {i}{lbl}]\n{doc['content'][:400].replace(chr(10), ' ').strip()}")
+            context_parts.append(format_retrieved_doc_for_prompt(doc, i, max_chars=400))
         context_str = "\n\n".join(context_parts)
         memory_ctx = ""
         if self.memory.history:
@@ -1613,11 +1738,12 @@ class FINANCIAL_HIERARCHICAL_LIGHT_RAG:
     def _snapshot_inject(self, live_docs: list):
         self._snap_docs = self.documents[:]
         self._snap_titles = self.titles[:]
+        self._snap_metadata = self.document_metadata[:]
         self._snap_embs = self.document_embeddings.copy() if self.document_embeddings is not None else None
         self._snap_comms = list(self.communities) if len(self.communities) > 0 else []
         for doc in live_docs:
             redacted, _ = self.pii_redactor.redact(doc["content"])
-            self.documents.append(redacted); self.titles.append(doc["title"])
+            self.documents.append(redacted); self.titles.append(doc["title"]); self.document_metadata.append(doc.get("metadata", {"source_type": "mcp_tool"}))
         new_embs = self.embedder.encode([f"{d['title']}: {d['content'][:600]}" for d in live_docs], normalize_embeddings=True).astype(np.float32)
         faiss.normalize_L2(new_embs)
         self.neighbor_index.add(new_embs)
@@ -1626,6 +1752,7 @@ class FINANCIAL_HIERARCHICAL_LIGHT_RAG:
 
     def _snapshot_restore(self):
         self.documents, self.titles = self._snap_docs, self._snap_titles
+        self.document_metadata = self._snap_metadata
         if self._snap_embs is not None:
             dim = self._snap_embs.shape[1]
             self.neighbor_index = faiss.IndexFlatIP(dim)
@@ -1751,6 +1878,23 @@ class ToolRegistry:
 class DeterministicQueryRouter:
     BLOCKS=[(r'hide income|conceal income|tax evasion','TAX_EVASION'),(r'guaranteed\s+\d+%\s+(?:returns?|profit)','SCAM_RETURNS'),(r'insider tip|non public information|inside information','INSIDER_TRADING'),(r'pump and dump|manipulate stock','MARKET_MANIPULATION'),(r'ponzi|pyramid scheme','PONZI')]
     EXCLUDED_TOKENS={'PE','NAV','SIP','EMI','NSE','BSE','ETF','IPO','ROI','CAGR','GDP','RBI','SEBI','PPF','NPS'}
+    KNOWN_NSE_ALIASES={
+        'tcs':'TCS',
+        'tata consultancy services':'TCS',
+        'infosys':'INFY',
+        'infy':'INFY',
+        'wipro':'WIPRO',
+        'reliance':'RELIANCE',
+        'hdfc bank':'HDFCBANK',
+        'hdfcbank':'HDFCBANK',
+        'icici bank':'ICICIBANK',
+        'icicibank':'ICICIBANK',
+        'sbi':'SBIN',
+        'state bank of india':'SBIN',
+        'zomato':'ZOMATO',
+        'bharti airtel':'BHARTIARTL',
+        'airtel':'BHARTIARTL',
+    }
     def __init__(self, registry, tokenizer=None, generator=None, device=None):
         self.registry=registry; self.tokenizer=tokenizer; self.generator=generator; self.device=device; self._symbol_cache={}
     def _has(self, pat, txt): return bool(re.search(pat, txt, re.I))
@@ -1929,12 +2073,20 @@ class DeterministicQueryRouter:
         return out, failed
 
     def _symbols(self, query):
+        out=[]
+        ql=str(query or '').lower()
+        for alias, sym in self.KNOWN_NSE_ALIASES.items():
+            if re.search(rf'\b{re.escape(alias)}\b', ql) and sym not in out:
+                out.append(sym)
         candidates=[]
         for tok in re.findall(r'\b[A-Z][A-Z0-9&-]{1,11}\b', query):
             if tok not in self.EXCLUDED_TOKENS: candidates.append(tok)
         candidates += self._company_name_candidates(query)
         candidates += self._yfinance_search_candidates(query)
-        out, failed = self._resolve_candidate_list(candidates)
+        resolved, failed = self._resolve_candidate_list(candidates, limit=max(0, 4-len(out)))
+        for sym in resolved:
+            if sym not in out:
+                out.append(sym)
         llm_candidates=[]
         if failed and len(out) < 4:
             llm_candidates = self._llm_symbol_candidates(query, failed_candidates=failed)
@@ -2022,7 +2174,7 @@ def _patched_init(self, kg_db_path='finsage_kg_database'):
 def _patched_generate(self, query, docs, community_context, reasoning_paths):
     if not docs: return "I don't have enough information to answer accurately. Consult a SEBI-registered financial advisor."
     ctx=[]
-    for i,d in enumerate(docs[:6],1): ctx.append(f"[Doc {i}{' [LIVE DATA]' if d.get('source')=='mcp_tool' else ''}]\n{d['content'][:420].replace(chr(10),' ').strip()}")
+    for i,d in enumerate(docs[:6],1): ctx.append(format_retrieved_doc_for_prompt(d, i, max_chars=420))
     mem=self.memory.get_context(); comm='\n'.join(community_context[:3]) if community_context else ''; paths='\n'.join(' -> '.join(p) for p in reasoning_paths[:3]) if reasoning_paths else ''
     system_msg = "You are FinSage, a grounded financial assistant for Indian users. Use only the evidence provided. Prefer exact figures from [LIVE DATA]. If evidence is partial, say what is known and what is missing. Keep it concise and practical. End with: Consult a SEBI-registered advisor."
     user_msg = f"{mem}\n\nDocuments:\n" + '\n\n'.join(ctx) + f"\n\n[Topic summaries]\n{comm}\n\n[Knowledge graph hints]\n{paths}\n\nQuestion: {query}"
@@ -2051,13 +2203,18 @@ async def _patched_query_agentic(self, question, k=8):
     docs,community_context,reasoning_paths=self.retrieve(question,k=k)
     if live_docs:
         self._snapshot_restore(); seen={d['title'] for d in docs}; docs=[d for d in live_docs if d['title'] not in seen] + docs
-    answer=self.generate(question, docs[:6], community_context, reasoning_paths)
+    market_live_tools={'portfolio_multi_agent','screener','amfi_nav'}
+    use_live_only=bool(live_docs and any(tc.get('tool') in market_live_tools for tc in tool_calls))
+    docs_for_answer=live_docs if use_live_only else docs[:6]
+    if use_live_only:
+        community_context,reasoning_paths=[],[]
+    answer=self.generate(question, docs_for_answer, community_context, reasoning_paths)
     ok,cat=self.output_guard.check(answer)
     if not ok: answer += self.output_guard.DISCLAIMER
     elapsed=round(time.time()-t0,2); mode=f"tool_augmented_{intent}" if tool_calls else f"rag_{intent}"
     self.memory.add(question, answer, {'intent':intent,'tool_calls':[tc.get('tool') for tc in tool_calls],'routing_source':routing['route_source']})
-    self.query_history.append({'question':question,'answer':answer,'time':elapsed,'retrieved_docs':[d['content'][:400] for d in docs[:4]],'routing':routing,'tool_calls':[tc.get('tool') for tc in tool_calls]})
-    return {'question':question,'answer':answer,'blocked':False,'mode':mode,'is_market':intent=='market','classifier':classification,'routing':routing,'tool_calls':[tc.get('tool') for tc in tool_calls],'sources':[d['title'] for d in docs[:6]],'retrieved_docs':[d['content'][:400] for d in docs[:4]],'kg_stats':{'entities':self.kg.number_of_nodes(),'relationships':self.kg.number_of_edges()},'time':elapsed}
+    self.query_history.append({'question':question,'answer':answer,'time':elapsed,'retrieved_docs':[d['content'][:400] for d in docs_for_answer[:4]],'routing':routing,'tool_calls':[tc.get('tool') for tc in tool_calls]})
+    return {'question':question,'answer':answer,'blocked':False,'mode':mode,'is_market':intent=='market','classifier':classification,'routing':routing,'tool_calls':[tc.get('tool') for tc in tool_calls],'sources':[d['title'] for d in docs_for_answer[:6]],'retrieved_docs':[d['content'][:400] for d in docs_for_answer[:4]],'kg_stats':{'entities':self.kg.number_of_nodes(),'relationships':self.kg.number_of_edges()},'time':elapsed}
 
 FINANCIAL_HIERARCHICAL_LIGHT_RAG.__init__=_patched_init
 FINANCIAL_HIERARCHICAL_LIGHT_RAG.generate=_patched_generate
@@ -2208,18 +2365,24 @@ async def _patched_query_agentic_v7(self, question, k=8):
     docs, community_context, reasoning_paths = self.retrieve(question, k=k)
     if live_docs:
         self._snapshot_restore(); seen={d['title'] for d in docs}; docs=[d for d in live_docs if d['title'] not in seen] + docs
-    print(f"FLOW retrieved_sources={[d['title'] for d in docs[:4]]}")
-    answer = self.generate(question, docs[:6], community_context, reasoning_paths)
+    market_live_tools = {'portfolio_multi_agent', 'screener', 'amfi_nav'}
+    use_live_only = bool(live_docs and any(tc.get('tool') in market_live_tools for tc in tool_calls))
+    docs_for_answer = live_docs if use_live_only else docs[:6]
+    if use_live_only:
+        community_context, reasoning_paths = [], []
+        print("FLOW source_filter=live_market_only")
+    print(f"FLOW retrieved_sources={[d['title'] for d in docs_for_answer[:4]]}")
+    answer = self.generate(question, docs_for_answer, community_context, reasoning_paths)
     out_safe, out_cat = self.output_guard.check(answer)
     if not out_safe:
         answer += self.output_guard.DISCLAIMER
     elapsed = round(time.time()-t0, 2)
     mode = "mcp_portfolio_multi_agent" if tool_calls and tool_calls[0].get("tool") == "portfolio_multi_agent" else f"mcp_{analysis['workflow']}"
     self.memory.add(question, answer, {'intent':analysis['intent'],'tool_calls':[tc.get('tool') for tc in tool_calls],'sentiment':analysis['sentiment'],'risk_profile':analysis['risk_profile'],'urgency':analysis['urgency']})
-    self.query_history.append({'question':question,'answer':answer,'time':elapsed,'retrieved_docs':[d['content'][:400] for d in docs[:4]],'tool_calls':[tc.get('tool') for tc in tool_calls],'sentiment_analysis':analysis})
+    self.query_history.append({'question':question,'answer':answer,'time':elapsed,'retrieved_docs':[d['content'][:400] for d in docs_for_answer[:4]],'tool_calls':[tc.get('tool') for tc in tool_calls],'sentiment_analysis':analysis})
     print(f"FLOW mode={mode} | elapsed={elapsed}s")
     print(f"ANSWER: {answer}")
-    return {'question':question,'answer':answer,'blocked':False,'mode':mode,'is_market':analysis['intent']=='market','sentiment_analysis':analysis,'tool_calls':[tc.get('tool') for tc in tool_calls],'sources':[d['title'] for d in docs[:6]],'retrieved_docs':[d['content'][:400] for d in docs[:4]],'kg_stats':{'entities':self.kg.number_of_nodes(),'relationships':self.kg.number_of_edges()},'time':elapsed}
+    return {'question':question,'answer':answer,'blocked':False,'mode':mode,'is_market':analysis['intent']=='market','sentiment_analysis':analysis,'tool_calls':[tc.get('tool') for tc in tool_calls],'sources':[d['title'] for d in docs_for_answer[:6]],'retrieved_docs':[d['content'][:400] for d in docs_for_answer[:4]],'kg_stats':{'entities':self.kg.number_of_nodes(),'relationships':self.kg.number_of_edges()},'time':elapsed}
 
 _ORIG_PATCHED_INIT_V7 = FINANCIAL_HIERARCHICAL_LIGHT_RAG.__init__
 def _patched_init_v7(self, kg_db_path='finsage_kg_database'):
@@ -2256,18 +2419,8 @@ async def run_demo():
         return None
 
     rag = FINANCIAL_HIERARCHICAL_LIGHT_RAG(kg_db_path="finsage_final_kg")
-    financial_docs = [
-        {"title": "50-30-20 Budgeting Rule", "content": "50-30-20 rule: 50% Needs (rent, groceries, EMIs), 30% Wants (dining, travel), 20% Savings (SIP, PPF, emergency fund). Mumbai/Delhi: 55-60% for needs."},
-        {"title": "Emergency Fund Guide", "content": "Target 3-6 months of monthly EXPENSES. Best: liquid mutual funds, 1-day redemption, ~7% returns. Ã¢â€šÂ¹40,000/month expenses Ã¢â€ â€™ target Ã¢â€šÂ¹1.2LÃ¢â‚¬â€œÃ¢â€šÂ¹2.4L."},
-        {"title": "PPF vs NPS Comparison", "content": "PPF: 15-year lock-in, ~7.1% returns, EEE tax-free, Ã¢â€šÂ¹1.5L limit, zero risk. NPS: till age 60, 8-12% market-linked, extra Ã¢â€šÂ¹50,000 under 80CCD(1B). Use both: PPF safety + NPS retirement deduction."},
-        {"title": "ELSS Tax-Saving Funds", "content": "ELSS: 3-year lock-in, deduction up to Ã¢â€šÂ¹1.5L under 80C. Returns 12-15% CAGR over 5+ years. LTCG above Ã¢â€šÂ¹1.25L taxed at 12.5%."},
-        {"title": "Income Tax Slabs FY 2024-25 New Regime", "content": "Ã¢â€šÂ¹0-3L NIL, Ã¢â€šÂ¹3-7L 5%, Ã¢â€šÂ¹7-10L 10%, Ã¢â€šÂ¹10-12L 15%, Ã¢â€šÂ¹12-15L 20%, >Ã¢â€šÂ¹15L 30%. 87A rebate: up to Ã¢â€šÂ¹7L = zero tax. Standard deduction Ã¢â€šÂ¹75,000 for salaried."},
-        {"title": "Legal Tax Saving Strategies", "content": "80C Ã¢â€šÂ¹1.5L (ELSS, PPF, EPF, home loan principal), 80D Ã¢â€šÂ¹25,000 (health insurance), 80CCD(1B) Ã¢â€šÂ¹50,000 (NPS extra), 24(b) Ã¢â€šÂ¹2L (home loan interest). Max deductions Ã¢â€šÂ¹4.25L."},
-        {"title": "SIP Investment Guide", "content": "SIP: fixed monthly auto-debit into mutual funds. Rupee Cost Averaging: low NAV = more units. Starts Ã¢â€šÂ¹500/month. LTCG above Ã¢â€šÂ¹1.25L at 12.5%."},
-        {"title": "Retirement Planning India", "content": "Corpus = monthly expenses Ãƒâ€” 12 Ãƒâ€” 25 (4% rule). Ã¢â€šÂ¹50,000/month Ã¢â€ â€™ Ã¢â€šÂ¹1.5 Cr needed. 25+ yrs: 70% equity + 20% NPS + 10% PPF."},
-        {"title": "Investment Return Warnings", "content": "No investment guarantees returns. FD 6.5-7.5%, PPF ~7.1%, SGB 2.5%+gold. Red flag: scheme promising >12% guaranteed."},
-        {"title": "Ponzi Scheme Warning Signs", "content": "Warning: guaranteed high returns, no SEBI/RBI registration, pressure to recruit. Report: scores.sebi.gov.in"},
-    ]
+    financial_docs = load_financial_docs()
+    print(f"Loaded {len(financial_docs)} financial seed docs from {SEED_DOCS_PATH}")
     print("\nIngesting knowledge base...")
     rag.ingest_financial_documents(financial_docs)
     rag.build_raptor_root()
