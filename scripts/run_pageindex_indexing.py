@@ -21,6 +21,7 @@ PAGEINDEX_INPUT_DIR = Path(os.environ.get("BANYANTREE_PAGEINDEX_INPUT_DIR", FINA
 PAGEINDEX_OUTPUT_DIR = Path(os.environ.get("BANYANTREE_PAGEINDEX_OUTPUT_DIR", FINANCIAL_KG_ROOT / "pageindex" / "outputs")).resolve()
 PAGEINDEX_STRUCTURES_DIR = Path(os.environ.get("BANYANTREE_PAGEINDEX_STRUCTURES_DIR", FINANCIAL_KG_ROOT / "pageindex" / "structures")).resolve()
 PAGEINDEX_MODEL = os.environ.get("BANYANTREE_PAGEINDEX_MODEL", "gpt-4o-mini")
+PAGEINDEX_RUN_MODEL = PAGEINDEX_MODEL.removeprefix("anthropic/")
 PAGEINDEX_REPO_DIR = Path(os.environ.get("BANYANTREE_PAGEINDEX_REPO_DIR", PROJECT_ROOT / "external" / "PageIndex")).resolve()
 
 
@@ -68,7 +69,7 @@ def main() -> int:
         return 0
 
     print(f"Found PageIndex runner: {runner}")
-    print(f"Indexing model: {PAGEINDEX_MODEL}")
+    print(f"Indexing model: {PAGEINDEX_RUN_MODEL}")
     print()
 
     for doc in docs:
@@ -88,7 +89,7 @@ def main() -> int:
             str(runner),
             *input_args,
             "--model",
-            PAGEINDEX_MODEL,
+            PAGEINDEX_RUN_MODEL,
             "--if-add-node-text",
             "yes",
             "--if-add-node-summary",

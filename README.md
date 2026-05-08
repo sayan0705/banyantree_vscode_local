@@ -90,6 +90,12 @@ Flatten PageIndex structures into LightRAG-ready docs:
 python .\scripts\import_pageindex_docs.py
 ```
 
+If API PageIndex hits rate limits, import PDFs with local Qwen instead:
+
+```bash
+python3 scripts/import_pdf_qwen_docs.py --pages-per-chunk 2
+```
+
 The flattened output is written to:
 
 ```text

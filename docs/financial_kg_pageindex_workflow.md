@@ -93,6 +93,13 @@ Recommended summarisation/indexing LLM:
 BANYANTREE_PAGEINDEX_MODEL=gpt-4o-mini
 ```
 
+For Anthropic/Claude, set for the Kaggle session:
+
+```bash
+export ANTHROPIC_API_KEY="your_key"
+export BANYANTREE_PAGEINDEX_MODEL="anthropic/claude-sonnet-4-5-20250929"
+```
+
 The main app can still use local `Qwen/Qwen2.5-7B-Instruct` for query answering.
 
 ## Index Long Docs
@@ -124,6 +131,29 @@ This writes:
 ```text
 data/financial_kg/raw_docs/pageindex/pageindex_flattened_docs.json
 ```
+
+## Qwen PDF Import Fallback
+
+If API-based PageIndex hits rate limits, use the local Qwen PDF importer instead:
+
+```bash
+python3 -m pip install --user "tokenizers==0.19.1"
+python3 scripts/import_pdf_qwen_docs.py --pages-per-chunk 2
+```
+
+This reads PDFs from:
+
+```text
+data/financial_kg/pageindex/inputs/
+```
+
+and writes the same flattened output file:
+
+```text
+data/financial_kg/raw_docs/pageindex/pageindex_flattened_docs.json
+```
+
+The output uses `source_type=qwen_pdf` and includes page ranges plus `section_path` metadata.
 
 The flattened docs include metadata:
 
