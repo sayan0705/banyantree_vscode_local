@@ -21,30 +21,20 @@ PAGEINDEX_INPUT_DIR = Path(os.environ.get("BANYANTREE_PAGEINDEX_INPUT_DIR", FINA
 PAGEINDEX_OUTPUT_DIR = Path(os.environ.get("BANYANTREE_PAGEINDEX_OUTPUT_DIR", FINANCIAL_KG_ROOT / "pageindex" / "outputs")).resolve()
 PAGEINDEX_STRUCTURES_DIR = Path(os.environ.get("BANYANTREE_PAGEINDEX_STRUCTURES_DIR", FINANCIAL_KG_ROOT / "pageindex" / "structures")).resolve()
 PAGEINDEX_MODEL = os.environ.get("BANYANTREE_PAGEINDEX_MODEL", "gpt-4o-mini")
+PAGEINDEX_REPO_DIR = Path(os.environ.get("BANYANTREE_PAGEINDEX_REPO_DIR", PROJECT_ROOT / "external" / "PageIndex")).resolve()
 
 
-def _find_pageindex_command() -> list[str] | None:
-    command = shutil.which("pageindex")
-    if command:
-        return [command]
-
-    module_probe = subprocess.run(
-        [sys.executable, "-c", "import pageindex"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if module_probe.returncode == 0:
-        return [sys.executable, "-m", "pageindex"]
-
-    return None
+def _pageindex_runner() -> Path | None:
+    runner = PAGEINDEX_REPO_DIR / "run_pageindex.py"
+    return runner if runner.exists() else None
 
 
 def _print_manual_instructions(adapter: PageIndexAdapter, docs: list[Path]) -> None:
-    print("PageIndex is not installed or does not expose a known CLI entry point.")
+    print("PageIndex repo clone not found.")
     print()
-    print("Install optional PageIndex dependencies only when you want to index documents:")
-    print("  python -m pip install -r requirements-pageindex.txt")
+    print("Clone PageIndex and install its dependencies only when you want to index documents:")
+    print(f"  git clone https://github.com/VectifyAI/PageIndex.git {PAGEINDEX_REPO_DIR}")
+    print(f"  python -m pip install -r {PAGEINDEX_REPO_DIR / 'requirements.txt'}")
     print()
     print("Recommended indexing LLM for PageIndex:")
     print(f"  BANYANTREE_PAGEINDEX_MODEL={PAGEINDEX_MODEL}")
@@ -68,8 +58,8 @@ def main() -> int:
         structures_dir=PAGEINDEX_STRUCTURES_DIR,
     )
     docs = adapter.discover_documents()
-    command = _find_pageindex_command()
-    if command is None:
+    runner = _pageindex_runner()
+    if runner is None:
         _print_manual_instructions(adapter, docs)
         return 0
 
@@ -77,10 +67,8 @@ def main() -> int:
         print(f"No PageIndex input docs found in {adapter.input_dir}")
         return 0
 
-    print(f"Found PageIndex command: {' '.join(command)}")
+    print(f"Found PageIndex runner: {runner}")
     print(f"Indexing model: {PAGEINDEX_MODEL}")
-    print("This runner is intentionally conservative. If the installed PageIndex CLI")
-    print("expects different flags, copy the printed command and adjust it manually.")
     print()
 
     for doc in docs:
@@ -88,17 +76,39 @@ def main() -> int:
         if structure_path.exists():
             print(f"Skipping already-indexed doc: {doc}")
             continue
-        candidate_command = command + [
-            "--input",
-            str(doc),
-            "--output",
-            str(structure_path),
+        if doc.suffix.lower() == ".pdf":
+            input_args = ["--pdf_path", str(doc)]
+        elif doc.suffix.lower() in {".md", ".markdown"}:
+            input_args = ["--md_path", str(doc)]
+        else:
+            print(f"Skipping unsupported PageIndex direct input type for runner: {doc}")
+            continue
+        candidate_command = [
+            sys.executable,
+            str(runner),
+            *input_args,
             "--model",
             PAGEINDEX_MODEL,
+            "--if-add-node-text",
+            "yes",
+            "--if-add-node-summary",
+            "yes",
+            "--if-add-doc-description",
+            "yes",
         ]
-        print("Suggested command:")
+        print("Running:")
         print("  " + " ".join(candidate_command))
-        print("Not executing automatically until PageIndex CLI flags are confirmed for this install.")
+        result = subprocess.run(candidate_command, cwd=str(PAGEINDEX_REPO_DIR), check=False)
+        if result.returncode != 0:
+            print(f"PageIndex command failed for {doc} with exit code {result.returncode}")
+            return result.returncode
+        generated_path = PAGEINDEX_REPO_DIR / "results" / f"{doc.stem}_structure.json"
+        if not generated_path.exists():
+            print(f"PageIndex completed, but expected result was not found: {generated_path}")
+            return 1
+        structure_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(generated_path, structure_path)
+        print(f"Copied PageIndex structure to: {structure_path}")
 
     print()
     print("After structures are created, run:")

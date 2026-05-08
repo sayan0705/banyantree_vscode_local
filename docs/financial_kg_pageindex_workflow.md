@@ -77,7 +77,14 @@ PageIndex is an offline ingestion dependency. Do not install it during every nor
 Install only when indexing documents:
 
 ```powershell
-python -m pip install -r requirements-pageindex.txt
+git clone https://github.com/VectifyAI/PageIndex.git external/PageIndex
+python -m pip install -r external/PageIndex/requirements.txt
+```
+
+On Kaggle, PageIndex dependency pins may conflict. Use the helper instead:
+
+```bash
+bash scripts/setup_pageindex_kaggle.sh
 ```
 
 Recommended summarisation/indexing LLM:

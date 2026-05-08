@@ -7,3 +7,4 @@ data/reranker/
 logs/
 *.log
 src/finsage_mcp_server.py
+external/

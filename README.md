@@ -68,7 +68,14 @@ data/financial_kg/pageindex/structures/
 Optional PageIndex ingestion dependencies are separate from the normal app:
 
 ```powershell
-python -m pip install -r requirements-pageindex.txt
+git clone https://github.com/VectifyAI/PageIndex.git external/PageIndex
+python -m pip install -r external/PageIndex/requirements.txt
+```
+
+On Kaggle, if PageIndex dependency pins conflict, use:
+
+```bash
+bash scripts/setup_pageindex_kaggle.sh
 ```
 
 PageIndex indexing is an offline step. It should be run only when source PDFs/Markdown/text files change:
