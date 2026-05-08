@@ -96,6 +96,12 @@ If API PageIndex hits rate limits, import PDFs with local Qwen instead:
 python3 scripts/import_pdf_qwen_docs.py --pages-per-chunk 2
 ```
 
+After PageIndex/LiteLLM experiments on Kaggle, restore main runtime package compatibility:
+
+```bash
+bash scripts/restore_main_runtime_kaggle.sh
+```
+
 The flattened output is written to:
 
 ```text

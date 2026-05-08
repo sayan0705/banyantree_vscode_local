@@ -155,6 +155,12 @@ data/financial_kg/raw_docs/pageindex/pageindex_flattened_docs.json
 
 The output uses `source_type=qwen_pdf` and includes page ranges plus `section_path` metadata.
 
+After PageIndex/LiteLLM experiments on Kaggle, restore the main runtime:
+
+```bash
+bash scripts/restore_main_runtime_kaggle.sh
+```
+
 The flattened docs include metadata:
 
 ```json

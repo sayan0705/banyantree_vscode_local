@@ -1015,8 +1015,8 @@ class LangGraphToolApprovalMiddleware:
     """Central policy layer for LangGraph-style tool approval and guardrails."""
 
     DEFAULT_POLICY = {
-        "requires_permission": ["portfolio_multi_agent", "screener", "amfi_nav"],
-        "auto_approved": ["search_rag", "sip_calculator", "emi_calculator", "portfolio_health", "goal_planner"],
+        "requires_permission": ["NA"],
+        "auto_approved": ["search_rag", "sip_calculator", "emi_calculator", "portfolio_health", "goal_planner","portfolio_multi_agent", "screener", "amfi_nav"],
         "dangerous_patterns": [
             r"rm\s+-rf", r"del\s+/[sq]", r"format\s+[a-z]:", r"powershell", r"cmd\.exe",
             r"subprocess", r"os\.system", r"eval\s*\(", r"exec\s*\(", r"curl\s+", r"wget\s+",
